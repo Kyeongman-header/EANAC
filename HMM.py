@@ -72,7 +72,7 @@ def eval(sent_infos,HMM):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-dataset", "--dataset", default="test",action="store")
+    parser.add_argument("-dataset", "--dataset", default="writingPrompts_reedsyPrompts_booksum",action="store")
     
     args = parser.parse_args()
 
