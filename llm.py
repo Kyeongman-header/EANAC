@@ -5,8 +5,7 @@ import jsonlines
 
 from openai import OpenAI
 
-client = OpenAI(api_key="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")
-
+client = OpenAI(api_key="")
 model = "gpt-3.5-turbo"
 
 query = "Please split the following story into appropriate five narrative arc steps: introduction, rising action, conflict, climax and resolution, and label it in a form of list of dictionaries as [{\"label\": \"(narrative arc step)\", \"sentence\": \"~~~\"}, ...].\n"
