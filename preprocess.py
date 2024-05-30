@@ -9,146 +9,215 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 from sklearn import metrics
+from transformers import AutoTokenizer
+import torch
+from sklearnex import patch_sklearn, config_context
+from sklearn.cluster import KMeans
+import time
+patch_sklearn()
+tokenizer = AutoTokenizer.from_pretrained("google-bert/bert-base-uncased")
 
 current_dir = os.path.abspath(__file__)
 
-def plot(dataset,X,labels,n_clusters_,db,eps,avg_pos_classes):
-    plt.clf()
-    unique_labels = set(labels)
-    core_samples_mask = np.zeros_like(labels, dtype=bool)
-    core_samples_mask[db.core_sample_indices_] = True
-    colors = [plt.cm.Spectral(each)
-            for each in np.linspace(0, 1, len(unique_labels))]
-    for k, col in zip(unique_labels, colors):
-        if k == -1:
-            # Black used for noise.
-            col = [0, 0, 0, 1]
 
-        class_member_mask = (labels == k)
-        label="label " + str(k) + " avg pos " + str(avg_pos_classes[k])
-        print(label)
-
-        xy = X[class_member_mask & core_samples_mask]
-        plt.plot(xy[:, 0], xy[:, 1], 'o', markerfacecolor=tuple(col),
-                markeredgecolor='k', markersize=14,label=label)
-
-        xy = X[class_member_mask & ~core_samples_mask]
-        plt.plot(xy[:, 0], xy[:, 1], 'o', markerfacecolor=tuple(col),
-                markeredgecolor='k', markersize=6, )
-
-
-    plt.legend(loc="upper left")
-    
-    plt.title(dataset + ' Estimated number of clusters: %d' % n_clusters_)
-    
-    plt.savefig(dataset + "_eps_"+str(eps)+"_clusters_"+str(n_clusters_)+".png")
-
-
-def sentence_clustering(dataset,stories):
+def sentence_clustering(dataset,stories,start):
     
     # step 1. sentence emebdding.
     sentence_bert = SentenceTransformer("sentence-transformers/all-mpnet-base-v2",device="cuda")
     vectors=[]
     sent_infos=[]
 
-    #stories=stories[:10]
+    # stories=stories[:10]
 
+    whole_sents=[]
+    count=0
     for story in tqdm(stories):
         sents=sent_tokenize((' ').join(story))
+        whole_sents.extend(sents)
         for j,sent in enumerate(sents):
-            
-            sent_vec={"emb" : sentence_bert.encode(sent),"pos":j/len(sents),"sentence" : sent}
-            vectors.append(sent_vec["emb"])
+        
+            # emb=tokenizer(sent,return_tensors="np")['input_ids']
+            # emb=np.sum(emb,axis=0)
+            sent_vec={"pos":j/len(sents),"sentence" : sent, 'story_label' : count}
             sent_infos.append(sent_vec)
+        count+=1
+    
+    # print(whole_sents)
+    len_whole=len(whole_sents)
+    print(len_whole)
 
-    vectors=np.array(vectors)
+    vectors=sentence_bert.encode(whole_sents,batch_size=64, show_progress_bar=True)
+    
     # step 2. clustering by DBScan.
-    print("huristic search for hyperparameter.")
-    while True:
-        print("epsilon?")
-        eps=input()
-        # if eps.isdigit() is False:
-        #     print("input a real number.")
-        #     continue
-        eps=float(eps)
-        clustering = DBSCAN(eps=eps, min_samples=10,metric='cosine',n_jobs=-1).fit(vectors)
-        
-        labels=clustering.labels_
-        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
-        n_noise_ = list(labels).count(-1)
-        print('Estimated number of clusters: %d' % n_clusters_)
-        print('Estimated number of noise points: %d' % n_noise_)
-
-        print("(close to 1 = best) Silhouette Coefficient: %0.3f"
-            % metrics.silhouette_score(vectors, labels))
-        
-
-
-        avg_pos_classes=np.zeros(n_clusters_, dtype=float)
-        num_pos_classes=np.zeros(n_clusters_, dtype=float)
-
-        for j in range(len(sent_infos)):
-            avg_pos_classes[labels[j]]+=sent_infos[j]['pos']
-            num_pos_classes[labels[j]]+=1
-        
-        print(avg_pos_classes)
-        print(num_pos_classes)
-
-        for j in range(len(avg_pos_classes)):
-            avg_pos_classes[j]=avg_pos_classes[j]/num_pos_classes[j]
-        
-        plot(dataset,vectors,labels,n_clusters_,clustering,eps,avg_pos_classes)
-
-
-        print("input the name of label")
-        name_of_labels=[]
-        for label in range(n_clusters_):
-            name_of_labels.append(input(str(label) + " : "))
-        print("if clustering done, enter 'x'. otherwise, it iterate.")
-        x=input()
-        if x == "x":
-            break
+    num_clusters = 5
+    clustering_model = KMeans(n_clusters=num_clusters)
+    print("KMeans operation start.")
+    start = time.time()
+    with config_context(target_offload="gpu:0"):
+        clustering_model.fit(vectors)
+    end = time.time()
+    print(f"{end - start:.5f} sec")
+    print("KMeans operation ends.")
     
-    for j,label in enumerate(labels):
-        sent_infos[j]['name_label']=name_of_labels[label]
-        sent_infos[j]['label']=label
-        del sent_infos[j]['emb']
+    
+    cluster_assignment = clustering_model.labels_
 
+    avg_pos_classes=np.zeros(5, dtype=float)
+    num_pos_classes=np.zeros(5, dtype=float)
+
+    for sentence_id, cluster_id in enumerate(cluster_assignment):
+        avg_pos_classes[cluster_id]+=sent_infos[sentence_id]['pos']
+        num_pos_classes[cluster_id]+=1
+
+
+    print("number of each class")
+    print(num_pos_classes)
+    
+    for j in range(len(avg_pos_classes)):
+        avg_pos_classes[j]=avg_pos_classes[j]/num_pos_classes[j]
+    
+    print("avg position of classes")
+    print(avg_pos_classes)
     
 
-    return sent_infos
-    # step 3. 
+    sorted_avg_pos_classes=sorted(avg_pos_classes)
+    
+    print("input the name of label")
+    name_of_labels=[]
+
+    name_rank=['intro','body_1','body_2','body_3','ending']
+
+    for label in range(5):
+        rank=sorted_avg_pos_classes.index(avg_pos_classes[label])
+        name_of_labels.append(name_rank[rank])
+
+    print(name_of_labels)
+
+    for sentence_id, cluster_id in enumerate(cluster_assignment):
+        sent_infos[sentence_id]['label']=cluster_id
+        sent_infos[sentence_id]['name_label']=name_of_labels[cluster_id]
 
 
+
+    # print("huristic search for hyperparameter.")
+
+    # count=0
+    # while True:
+    #     print("min_community_size?")
+    #     # min_community_size=input()
+    #     min_community_size=start+count*100
+    #     print(min_community_size)
+
+    #     clusters = util.community_detection(vectors, min_community_size=int(min_community_size), threshold=0.75,)
+    #     avg_pos_classes=np.zeros(len(clusters), dtype=float)
+    #     num_pos_classes=np.zeros(len(clusters), dtype=float)
+
+
+    #     print(len(clusters))
+    #     if len(clusters)>5:
+            
+    #         print("too many clusters.")
+    #         count+=1
+    #         continue
+    #     elif len(clusters)<5:
+    #         print("too low clusters.")
+    #         count-=0.2
+    #         continue
+        
+    #     for i, cluster in enumerate(clusters):
+        
+    #         print("\nCluster {}, #{} Elements ".format(i + 1, len(cluster)))
+
+    #         for sentence_id in cluster:
+    #             avg_pos_classes[i]+=sent_infos[sentence_id]['pos']
+    #             num_pos_classes[i]+=1
+
+
+    #     print("number of each class")
+    #     print(num_pos_classes)
+        
+    #     for j in range(len(avg_pos_classes)):
+    #         avg_pos_classes[j]=avg_pos_classes[j]/num_pos_classes[j]
+        
+    #     print("avg position of classes")
+    #     print(avg_pos_classes)
+        
+
+    #     sorted_avg_pos_classes=sorted(avg_pos_classes)
+        
+    #     print("input the name of label")
+    #     name_of_labels=[]
+
+    #     name_rank=['intro','body_1','body_2','body_3','ending']
+
+    #     for label in range(len(clusters)):
+    #         rank=sorted_avg_pos_classes.index(avg_pos_classes[label])
+    #         name_of_labels.append(name_rank[rank])
+
+    #     print(name_of_labels)
+
+    #     sentence_ids=[]
+    #     for i, cluster in enumerate(clusters):
+    #         for sentence_id in cluster:
+    #             sentence_ids.append(sentence_id)
+    #             # print(sentence_id)
+    #             # print(sent_infos[sentence_id])
+
+    #             sent_infos[sentence_id]['name_label']=name_of_labels[i]
+    #             sent_infos[sentence_id]['label']=i
+    #             # print(sent_infos[sentence_id])
+        
+    #     for j,sent_info in enumerate(sent_infos):
+    #         if 'label' in sent_info is False:
+    #             if last_story != sent_info['story_label']:
+    #                 sent_info['name_label']='intro'
+    #                 sent_info['label']=name_of_labels.index('intro')
+    #             else :
+    #                 sent_info['name_label']=last_label
+    #                 sent_info['label']=name_of_labels.index(last_label)
+            
+    #         last_label=sent_info
+
+    #     break
+    
+
+    return sent_infos,name_of_labels
+
+import random
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-dataset", "--dataset", default="writingPrompts_reedsyPrompts_booksum",action="store")
+    parser.add_argument("-dataset", "--dataset", default="wp_rp_bk",action="store")
     
     args = parser.parse_args()
 
+    stories=[]
+    with jsonlines.open(os.path.join(os.path.dirname(current_dir), "dataset", args.dataset + "_test.jsonl")) as f:
+        for line in f:
+            stories.append(line['stories'])
+    
+    print(len(stories))
+    stories=random.sample(stories, k=3000)
+    test_sent_infos,name_of_labels=sentence_clustering("test",stories,100)
+
+
+
+    with open(os.path.dirname(current_dir) + "/dataset/"+ args.dataset + "_test.pkl", 'wb') as f:
+        pickle.dump(test_sent_infos, f,)
+    with open(os.path.dirname(current_dir) + "/dataset/"+ args.dataset + "_test_name_of_labels.pkl", 'wb') as f:
+        pickle.dump(name_of_labels, f,)
     
     stories=[]
-    with jsonlines.open(os.path.join(os.path.dirname(current_dir), "dataset", args.dataset + "_train_points.jsonl")) as f:
+    with jsonlines.open(os.path.join(os.path.dirname(current_dir), "dataset", args.dataset + "_train.jsonl")) as f:
         for line in f:
             stories.append(line['stories'])
 
     print(len(stories))
+    stories=random.sample(stories, k=30000)
 
-    train_sent_infos=sentence_clustering("train",stories)
+    train_sent_infos,name_of_labels=sentence_clustering("train",stories,960)
 
     with open(os.path.dirname(current_dir) + "/dataset/"+ args.dataset + "_train.pkl", 'wb') as f:
         pickle.dump(train_sent_infos, f,)
-
-    stories=[]
-    with jsonlines.open(os.path.join(os.path.dirname(current_dir), "dataset", args.dataset + "_test_points.jsonl")) as f:
-        for line in f:
-            stories.append(line['stories'])
-    
-    print(len(stories))
-    test_sent_infos=sentence_clustering("test",stories)
-
-    # with jsonlines.open(os.path.dirname(current_dir) + "/results/"+args.file_dir+"/evaluation_results.jsonl", mode) as fw:
-    #     fw.write_all(result)
-    with open(os.path.dirname(current_dir) + "/dataset/"+ args.dataset + "_test.pkl", 'wb') as f:
-        pickle.dump(test_sent_infos, f,)
+    with open(os.path.dirname(current_dir) + "/dataset/"+ args.dataset + "_train_name_of_labels.pkl", 'wb') as f:
+        pickle.dump(name_of_labels, f,)
